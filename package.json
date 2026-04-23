@@ -1,0 +1,25 @@
+{
+  "name": "@agiterra/crew-fleet-tools",
+  "version": "0.1.0",
+  "description": "Cross-machine crew orchestration — SSH fan-out over the machines registry for fleet-level queries and (later) agent handoffs.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "crew-fleet-mcp": "./src/mcp-server.ts"
+  },
+  "files": [
+    "src/"
+  ],
+  "dependencies": {
+    "@agiterra/crew-tools": "agiterra/crew-tools#v2.4.1",
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  },
+  "license": "MIT",
+  "author": "Tim Garthwaite <https://github.com/mividtim>"
+}
