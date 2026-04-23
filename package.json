@@ -1,6 +1,6 @@
 {
   "name": "@agiterra/crew-fleet-tools",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Cross-machine crew orchestration — SSH fan-out over the machines registry for fleet-level queries and (later) agent handoffs.",
   "type": "module",
   "main": "./src/index.ts",
@@ -14,7 +14,7 @@
     "src/"
   ],
   "dependencies": {
-    "@agiterra/crew-tools": "agiterra/crew-tools#v2.4.1",
+    "@agiterra/crew-tools": "agiterra/crew-tools#v2.5.0",
     "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {

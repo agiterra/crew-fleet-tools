@@ -15,6 +15,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { fleetList, fleetStatus } from "./fleet.js";
+import { fleetMove } from "./move.js";
 
 const mcp = new Server(
   { name: "crew-fleet", version: "0.1.0" },
@@ -54,6 +55,50 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: "Per-host SSH timeout in ms. Default 5000.",
           },
         },
+      },
+    },
+    {
+      name: "fleet_move",
+      description:
+        "Move a running agent from the local machine to a registered " +
+        "destination machine, preserving its Claude Code conversation " +
+        "history via `claude --resume`.\n\n" +
+        "Handoff sequence:\n" +
+        "  1. Snapshot the source agent + its spawn manifest.\n" +
+        "  2. Interrupt (Ctrl-B Ctrl-B) to background any live tool call.\n" +
+        "  3. /exit\\r into the source screen; wait up to 15s for clean exit.\n" +
+        "  4. rsync the CC session JSONL from local to the destination.\n" +
+        "  5. Stop source (writes local tombstone, frees the row).\n" +
+        "  6. ssh dest `crew resume --json -` with the inline manifest.\n" +
+        "  7. Optional: send `kickoff_prompt` to the destination screen.\n\n" +
+        "Wire identity is NOT rotated by this tool. If the agent needs a " +
+        "fresh pubkey on Wire, pre-call wire-ipc's `register_agent` and " +
+        "pass the returned `private_key_b64` via `env_overrides." +
+        "AGENT_PRIVATE_KEY`. Keeping Wire rotation out of fleet_move " +
+        "preserves the crew / wire separation (crew-fleet never imports " +
+        "wire-tools).\n\n" +
+        "v0.2.0 only moves agents FROM the local machine. Remote-to-" +
+        "remote moves are a future extension.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          id: { type: "string", description: "Agent ID to move." },
+          destination: { type: "string", description: "Name of a registered machine (from `machine_list`)." },
+          env_overrides: {
+            type: "object",
+            additionalProperties: { type: "string" },
+            description: "Env merged on top of the source manifest's env before resume. Use to inject a rotated AGENT_PRIVATE_KEY.",
+          },
+          kickoff_prompt: {
+            type: "string",
+            description: "Optional text to send (with trailing \\r) to the destination screen after resume, kicking the agent into its next turn.",
+          },
+          ssh_timeout_ms: {
+            type: "number",
+            description: "Per-SSH-call timeout in ms. Default 10000. The rsync step gets 3x this budget.",
+          },
+        },
+        required: ["id", "destination"],
       },
     },
     {
@@ -97,6 +142,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         result = await fleetStatus({
           machines: a.machines as string[] | undefined,
           timeoutMs: a.timeout_ms as number | undefined,
+        });
+        break;
+      case "fleet_move":
+        result = await fleetMove({
+          id: a.id as string,
+          destination: a.destination as string,
+          envOverrides: a.env_overrides as Record<string, string> | undefined,
+          kickoffPrompt: a.kickoff_prompt as string | undefined,
+          sshTimeoutMs: a.ssh_timeout_ms as number | undefined,
         });
         break;
       default:
