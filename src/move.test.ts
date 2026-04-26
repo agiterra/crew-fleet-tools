@@ -200,6 +200,67 @@ describe("fleetMove", () => {
     expect(store.getAgent("move-me")).not.toBeNull();
   });
 
+  test("translates project_dir when dest $HOME differs from source", async () => {
+    seedAgentAndDest(store);
+    // Reset the seeded agent to use a HOME-rooted path so translation has work to do.
+    const sourceHome = process.env.HOME ?? "/Users/tim";
+    const sourceProj = `${sourceHome}/Projects/Foo`;
+    store["db"].prepare(
+      "UPDATE agents SET spawn_manifest = ? WHERE id = ?"
+    ).run(JSON.stringify({
+      env: { AGENT_ID: "move-me", AGENT_NAME: "MoveMe" },
+      runtime: "claude-code",
+      project_dir: sourceProj,
+      display_name: "MoveMe",
+    }), "move-me");
+
+    const orch = stubOrchestrator(store);
+    const calls: ShellCall[] = [];
+    const shell = makeShell([
+      // Probe dest $HOME — return a different home.
+      { match: /\$HOME/, stdout: "/Users/mividtim", exitCode: 0 },
+      { match: /mkdir -p/, exitCode: 0 },
+      { match: /rsync/, exitCode: 0 },
+      { match: /crew resume/, stdout: JSON.stringify({ id: "move-me" }), exitCode: 0 },
+    ], calls);
+
+    const res = await fleetMove(
+      { id: "move-me", destination: "home-mini", dbPath, orchestrator: orch as any },
+      shell,
+    );
+    expect(res.steps.some((s) => /translated project_dir/.test(s))).toBe(true);
+    // mkdir + rsync should reference the dest-encoded path (-Users-mividtim-Projects-Foo)
+    const mkdir = calls.find((c) => /mkdir -p/.test(c.cmd))!;
+    expect(mkdir.cmd).toContain("-Users-mividtim-Projects-Foo");
+    const rsync = calls.find((c) => /rsync/.test(c.cmd))!;
+    expect(rsync.cmd).toContain("-Users-mividtim-Projects-Foo");
+    // The resume payload should carry the TRANSLATED projectDir.
+    const resume = calls.find((c) => /crew resume/.test(c.cmd))!;
+    const payload = JSON.parse(resume.stdin!);
+    expect(payload.projectDir).toBe("/Users/mividtim/Projects/Foo");
+  });
+
+  test("passes through project_dir when source $HOME matches dest $HOME", async () => {
+    seedAgentAndDest(store);
+    const orch = stubOrchestrator(store);
+    const calls: ShellCall[] = [];
+    const shell = makeShell([
+      { match: /\$HOME/, stdout: process.env.HOME ?? "/Users/tim", exitCode: 0 },
+      { match: /mkdir -p|rsync/, exitCode: 0 },
+      { match: /crew resume/, stdout: "{}", exitCode: 0 },
+    ], calls);
+
+    const res = await fleetMove(
+      { id: "move-me", destination: "home-mini", dbPath, orchestrator: orch as any },
+      shell,
+    );
+    // No translation log line.
+    expect(res.steps.some((s) => /translated project_dir/.test(s))).toBe(false);
+    const resume = calls.find((c) => /crew resume/.test(c.cmd))!;
+    const payload = JSON.parse(resume.stdin!);
+    expect(payload.projectDir).toBe("/tmp/move-wd");
+  });
+
   test("skips rsync when agent has no cc_session_id", async () => {
     store.createMachine({ name: "home-mini", hostname: "home-mini", ssh_host: "tim@home-mini.local" });
     store.createAgent({
