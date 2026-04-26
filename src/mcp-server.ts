@@ -16,6 +16,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { fleetList, fleetStatus } from "./fleet.js";
 import { fleetMove } from "./move.js";
+import { fleetLaunch } from "./launch.js";
 
 const mcp = new Server(
   { name: "crew-fleet", version: "0.1.0" },
@@ -55,6 +56,41 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: "Per-host SSH timeout in ms. Default 5000.",
           },
         },
+      },
+    },
+    {
+      name: "fleet_launch",
+      description:
+        "Spawn a fresh agent on a registered remote machine. " +
+        "Symmetric with agent_launch but for the cross-machine case: " +
+        "validates the destination, builds the launch payload, then " +
+        "SSHes the dest and runs `crew launch --json -` with the " +
+        "payload via stdin (keeps env secrets out of argv / SSH " +
+        "audit logs). Returns the destination-side agent row.\n\n" +
+        "Wire identity is the CALLER's concern: if the agent needs " +
+        "to register on a peer Wire (per-machine Wire instances), " +
+        "pre-call wire-ipc's register_agent against that Wire and " +
+        "pass the returned private_key_b64 via " +
+        "`env.AGENT_PRIVATE_KEY`. crew-fleet itself never imports " +
+        "wire-tools.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          destination: { type: "string", description: "Name of a registered machine (from `machine_list`). Refuses local." },
+          env: {
+            type: "object",
+            additionalProperties: { type: "string" },
+            description: "Env exported into the spawned process. Must include AGENT_ID. AGENT_PRIVATE_KEY belongs here too if the agent uses Wire.",
+          },
+          project_dir: { type: "string", description: "Working directory on the destination." },
+          prompt: { type: "string", description: "Initial prompt for the spawned runtime." },
+          runtime: { type: "string", description: "Runtime — claude-code (default) or codex." },
+          extra_flags: { type: "string", description: "Additional CLI flags appended after the runtime command." },
+          badge: { type: "string", description: "Badge text written to the destination agent's row." },
+          ttl_idle_minutes: { type: "number", description: "Optional idle TTL — destination's reaper kills the agent after this much idle time." },
+          ssh_timeout_ms: { type: "number", description: "Per-SSH-call timeout in ms. Default 15000." },
+        },
+        required: ["destination", "env"],
       },
     },
     {
@@ -142,6 +178,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         result = await fleetStatus({
           machines: a.machines as string[] | undefined,
           timeoutMs: a.timeout_ms as number | undefined,
+        });
+        break;
+      case "fleet_launch":
+        result = await fleetLaunch({
+          destination: a.destination as string,
+          env: a.env as Record<string, string>,
+          projectDir: a.project_dir as string | undefined,
+          prompt: a.prompt as string | undefined,
+          runtime: a.runtime as string | undefined,
+          extraFlags: a.extra_flags as string | undefined,
+          badge: a.badge as string | undefined,
+          ttlIdleMinutes: a.ttl_idle_minutes as number | undefined,
+          sshTimeoutMs: a.ssh_timeout_ms as number | undefined,
         });
         break;
       case "fleet_move":
