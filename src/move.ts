@@ -101,6 +101,50 @@ function encodeProjectDir(cwd: string): string {
   return cwd.replace(/\//g, "-");
 }
 
+/**
+ * Translate a project_dir from the source machine's HOME shape to the
+ * destination machine's. If the path doesn't sit under the source HOME
+ * (e.g. it's an absolute path like /tmp/wd) we leave it alone; the dest
+ * is expected to either have an identical absolute path or fail
+ * cleanly when claude --resume can't find the JSONL.
+ *
+ * Examples:
+ *   src HOME = /Users/tim, dest HOME = /Users/mividtim
+ *   /Users/tim/Projects/Foo  ->  /Users/mividtim/Projects/Foo  ✓
+ *   /tmp/anywhere            ->  /tmp/anywhere                  (passthrough)
+ *
+ * Both sides' encoded CC projects dir matches the rewritten absolute
+ * path: -Users-tim-Projects-Foo (src) vs -Users-mividtim-Projects-Foo (dest).
+ */
+function translateProjectDir(sourcePath: string, sourceHome: string, destHome: string): string {
+  if (sourceHome === destHome) return sourcePath;
+  const normalizedSrcHome = sourceHome.endsWith("/") ? sourceHome : sourceHome + "/";
+  if (sourcePath === sourceHome) return destHome;
+  if (sourcePath.startsWith(normalizedSrcHome)) {
+    const tail = sourcePath.slice(sourceHome.length);
+    return `${destHome}${tail}`;
+  }
+  return sourcePath;
+}
+
+/** SSH the destination and read $HOME. Returns null on failure (caller falls back). */
+async function probeDestHome(
+  sshHost: string,
+  sshPort: number | null | undefined,
+  sshTimeoutMs: number,
+  runShell: ShellRunner,
+): Promise<string | null> {
+  const portArg = sshPort ? ` -p ${sshPort}` : "";
+  const sshOpts = `ssh -o BatchMode=yes -o ConnectTimeout=${Math.max(1, Math.floor(sshTimeoutMs / 1000))}${portArg}`;
+  const res = await runShell({
+    cmd: `${sshOpts} ${sshHost} 'printf %s "$HOME"'`,
+    timeoutMs: sshTimeoutMs,
+  });
+  if (res.exitCode !== 0) return null;
+  const home = res.stdout.trim();
+  return home || null;
+}
+
 async function waitForScreenExit(screenName: string, timeoutMs: number, pollMs = 500): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -175,11 +219,31 @@ export async function fleetMove(opts: FleetMoveOpts, runShell: ShellRunner = def
     steps.push(`source screen didn't exit within ${SCREEN_EXIT_TIMEOUT_MS}ms — will force-kill via stopAgent`);
   }
 
+  // Resolve the project_dir on the destination side. If the dest's
+  // $HOME differs from ours (different username, different layout),
+  // we translate the project_dir's HOME prefix so the encoded
+  // ~/.claude/projects/<encoded> directory and the resume's
+  // projectDir line up on the other side.
+  const sourceHome = process.env.HOME ?? homedir();
+  let destHome = sourceHome; // default: assume identical layout
+  let destProjectDir = manifest.project_dir;
+  const probedHome = await probeDestHome(dest.ssh_host, dest.ssh_port, sshTimeoutMs, runShell);
+  if (probedHome) {
+    destHome = probedHome;
+    destProjectDir = translateProjectDir(manifest.project_dir, sourceHome, destHome);
+    if (destProjectDir !== manifest.project_dir) {
+      steps.push(`translated project_dir for dest: ${manifest.project_dir} -> ${destProjectDir}`);
+    }
+  } else {
+    steps.push(`could not probe dest $HOME — assuming identical layout (${sourceHome})`);
+  }
+
   // 3. rsync JSONL local → dest (ONLY if we have a cc_session_id).
   if (ccSessionId) {
-    const encoded = encodeProjectDir(manifest.project_dir);
-    const localPath = `${process.env.HOME ?? homedir()}/.claude/projects/${encoded}/${ccSessionId}.jsonl`;
-    const destDir = `.claude/projects/${encoded}`;
+    const sourceEncoded = encodeProjectDir(manifest.project_dir);
+    const destEncoded = encodeProjectDir(destProjectDir);
+    const localPath = `${sourceHome}/.claude/projects/${sourceEncoded}/${ccSessionId}.jsonl`;
+    const destDir = `.claude/projects/${destEncoded}`;
     const destSpec = dest.ssh_host;
     const portArg = dest.ssh_port ? ` -p ${dest.ssh_port}` : "";
     const sshOpts = `ssh -o BatchMode=yes -o ConnectTimeout=${Math.max(1, Math.floor(sshTimeoutMs / 1000))}${portArg}`;
@@ -213,10 +277,12 @@ export async function fleetMove(opts: FleetMoveOpts, runShell: ShellRunner = def
   }
 
   // 5. ssh dest: `crew resume --json -` with inline payload.
+  // Use the translated project_dir so the dest's claude --resume
+  // looks up the JSONL we just rsynced into ~/.claude/projects/<dest-encoded>/.
   const resumePayload = {
     id: opts.id,
     ccSessionId: ccSessionId,
-    projectDir: manifest.project_dir,
+    projectDir: destProjectDir,
     env: { ...manifest.env, ...(opts.envOverrides ?? {}) },
     channels: manifest.channels,
     runtime: manifest.runtime,
